@@ -1,0 +1,104 @@
+name: Build and Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Publish the NuGet package to nuget.org after a successful build'
+        type: boolean
+        default: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.pack.outputs.version }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          # Nerdbank.GitVersioning needs full history to compute the version from git height.
+          fetch-depth: 0
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v6
+        with:
+          # Both target frameworks the project multi-targets (net8.0;net10.0) - so Test below
+          # actually runs on the net8.0 runtime instead of skipping it for lack of a matching host.
+          dotnet-version: |
+            8.0.x
+            10.0.x
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Build
+        run: dotnet build --no-restore --configuration Release
+
+      - name: Test
+        run: dotnet test --no-build --configuration Release
+
+      - name: Pack
+        id: pack
+        run: |
+          dotnet pack src/ShellyEmMcp/ShellyEmMcp.csproj --no-build --configuration Release -o ./nupkg
+          version=$(basename ./nupkg/ShellyEmMcp.*.nupkg .nupkg | sed 's/^ShellyEmMcp\.//')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Upload NuGet package artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: nuget-package
+          path: ./nupkg/*.*nupkg
+
+  publish:
+    # Only reachable via a manual "Run workflow" with publish=true - never on push/PR - and only
+    # once `build` (which includes Test) has succeeded, since this job `needs` it.
+    needs: build
+    if: github.event_name == 'workflow_dispatch' && inputs.publish == true
+    runs-on: ubuntu-latest
+    environment: nuget-publish # must match the "Environment" field on nuget.org's Trusted Publishing policy for this repo.
+    permissions:
+      id-token: write # required so GitHub can issue the OIDC token NuGet/login exchanges for a short-lived API key.
+      contents: write # required for the release-creation step to create a tag + GitHub release.
+
+    steps:
+      - name: Download NuGet package artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: nuget-package
+          path: ./nupkg
+
+      - name: NuGet login (OIDC -> temporary API key)
+        uses: NuGet/login@v1
+        id: login
+        with:
+          # Defaults to the GitHub repo owner as the nuget.org profile name, so a fork publishes
+          # under its own identity rather than this repo's - see docs/DEVELOPER.md's Publishing
+          # section for the assumption this relies on (GitHub username == nuget.org username) and
+          # what to do if that's not true for you.
+          user: ${{ github.repository_owner }}
+
+      - name: Push to NuGet.org
+        id: push
+        run: dotnet nuget push "./nupkg/*.nupkg" --api-key ${{ steps.login.outputs.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate
+
+      - name: Create GitHub release
+        # steps.push.outcome (not just success()) so this stays safe even if the push step ever
+        # gains continue-on-error: true - a failed NuGet push must never produce a release.
+        if: success() && steps.push.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "v${{ needs.build.outputs.version }}" \
+            ./nupkg/*.nupkg ./nupkg/*.snupkg \
+            --repo "${{ github.repository }}" \
+            --title "v${{ needs.build.outputs.version }}" \
+            --generate-notes

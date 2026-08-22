@@ -1,0 +1,14 @@
+## .NET
+bin/
+obj/
+*.user
+.vs/
+nupkg/
+
+## OS
+.DS_Store
+
+## Local secrets / tokens
+*.env
+.env.*
+appsettings.*.local.json

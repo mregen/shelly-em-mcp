@@ -1,0 +1,168 @@
+# shelly-em-mcp
+
+[![Build](https://img.shields.io/github/actions/workflow/status/mregen/shelly-em-mcp/build.yml?branch=main&label=build)](https://github.com/mregen/shelly-em-mcp/actions/workflows/build.yml)
+[![NuGet Downloads](https://img.shields.io/nuget/dt/ShellyEmMcp?label=downloads)](https://www.nuget.org/packages/ShellyEmMcp)
+
+A .NET-based Model Context Protocol (MCP) server for [Shelly](https://www.shelly.com/) smart-home power meters, installable as a .NET tool from [nuget.org](https://www.nuget.org/packages/ShellyEmMcp) — query your home's live power draw and energy totals straight from an LLM.
+
+**This is an independent, community-built project - not an official Shelly product.** It talks directly to your own Shelly devices over your local network using their published local RPC API. "Shelly" is a trademark of its respective owner, used here only to describe device compatibility.
+
+## Purpose
+
+A Shelly energy meter (Pro 3EM, EM, Plus PM, etc.) tracks live power draw and cumulative energy down to the phase, but that data normally only surfaces in the Shelly app. This project connects it to an LLM directly, so you can ask about your home's power usage in plain language.
+
+An example of what that looks like once the tools are connected (illustrative - your own numbers will differ):
+
+> **You:** What's my current power draw?
+>
+> **Claude:** Your Hausanschluss meter is currently drawing 1.4 kW total - 620 W on phase A, 480 W on phase B, and 310 W on phase C.
+
+## Requirements
+
+- **.NET 8 or .NET 10 runtime** - to install and run the tool (see [Install](#install) below)
+- **An MCP-capable LLM client** - Claude Code, Claude Desktop, or LM Studio (see [Configure Claude Code, Claude Desktop, or LM Studio](#configure-claude-code-claude-desktop-or-lm-studio) below)
+- **A Shelly Gen2/Gen3 EM-class device on your local network** (Pro 3EM, 3EM, EM, Plus PM, Plus 1PM) - reachable at a fixed LAN IP
+
+## Status
+
+Initial build, implemented against the documented Shelly Gen2 RPC API and covered by unit tests,
+but **not yet exercised against a real device** - see [`CLAUDE.md`](CLAUDE.md) for what's still
+pending before that status can be upgraded.
+
+| Feature | Status |
+|---|---|
+| Local device status (uptime, cloud connectivity) | 🟡 Implemented, not yet verified live |
+| Live per-phase power/voltage/current/power-factor/frequency/error flags | 🟡 Implemented, not yet verified live |
+| Cumulative energy totals (consumed/returned, per phase) | 🟡 Implemented, not yet verified live |
+| Alarm/CT-type configuration | 🟡 Implemented, not yet verified live |
+| Local energy history (on-device, no Cloud) | 🟡 Implemented, not yet verified live - see the interval-semantics caveat in `CLAUDE.md` |
+| Switch/relay control | ⏳ Not built - none of the devices tested against have a relay |
+| Gen1 device support (older 3EM/EM REST API) | ⏳ Not built - not needed for a Gen2/Gen3 device |
+| `monophase` profile (per-channel EM1/EM1Data instead of combined EM) | ⏳ Not built - assumes the default `triphase` profile |
+| Shelly Cloud API support | ⏳ Design sketch only - see [`docs/cloud-api.md`](docs/cloud-api.md) |
+
+See [open issues](https://github.com/mregen/shelly-em-mcp/issues) for the current roadmap.
+
+## Security
+
+The HTTP transport has **no authentication or authorization layer yet** - anyone who can reach
+the endpoint can call any tool, including the ones reading your home's live power data. This is
+fine for local use (stdio, or `--http` left on `localhost`), but it means **this must not be
+exposed publicly** - no public Docker hosting, no binding to `0.0.0.0` on an open network.
+
+Separately, the server itself talks to your Shelly devices in plaintext over your LAN (Shelly's
+Gen2 local RPC API has no TLS) - normal for local smart-home devices, but worth knowing if your
+network isn't trusted.
+
+## Available tools
+
+| Tool | Notes |
+|---|---|
+| `list_devices` | All configured devices with reachability, model, generation, firmware, app, and local-auth status |
+| `get_status` | System status (uptime, cloud connectivity) for one device or all |
+| `get_power` | Current total active power (W) for one device, or all devices plus a combined total |
+| `get_energy_live` | Full per-phase breakdown (voltage, current, active/apparent power, power factor, frequency, error/alarm flags for A/B/C, plus neutral current and totals) for one device |
+| `get_energy_totals` | Cumulative energy counters (Wh consumed/returned, per phase and total) for one device |
+| `get_energy_config` | CT type, phase-reversal settings, and alarm thresholds (under/over voltage, current, power per phase) for one device |
+| `get_energy_history` | Total energy consumed/returned per phase over a recent time window, summed from the device's own on-device history (Pro 3EM stores ~60 days of 1-minute data locally - no Shelly Cloud needed) |
+
+## Install
+
+Requires the .NET 8 or .NET 10 SDK - the package multi-targets both, so `dotnet tool install`
+picks whichever one matches your installed SDK automatically.
+
+```bash
+dotnet tool install --global ShellyEmMcp
+```
+
+This installs a `shelly-em-mcp` command. Confirm it's on your PATH with `shelly-em-mcp --version`
+(the .NET tools directory, `~/.dotnet/tools`, needs to be there - the installer usually adds it
+automatically).
+
+## Configure your devices
+
+Devices are plain configuration - a name and a LAN IP/hostname, no account or API key needed for
+local access. Add them to `appsettings.json` next to the installed tool, or override via
+environment variables using .NET's array-binding convention:
+
+```bash
+export Shelly__Devices__0__Name="Hausanschluss"
+export Shelly__Devices__0__Host="192.168.1.100"
+```
+
+Add more devices by incrementing the index (`Shelly__Devices__1__Name`, etc.).
+
+## Run it
+
+The server supports two transports, chosen at startup - **stdio by default**, or HTTP via a flag:
+
+```bash
+shelly-em-mcp                                       # stdio - for MCP clients that spawn the process directly
+shelly-em-mcp --http --urls http://localhost:5250    # HTTP - a long-running server on a port
+```
+
+In HTTP mode the MCP endpoint is at `<url>/mcp` (Streamable HTTP), e.g. `http://localhost:5250/mcp`.
+
+## Configure Claude Code, Claude Desktop, or LM Studio
+
+**Can these clients start `shelly-em-mcp` automatically?** Yes - all three spawn a local stdio
+process directly from their own config, no server to keep running yourself.
+
+### Find the installed binary's absolute path
+
+GUI-launched apps often don't inherit the PATH your terminal has, so the bare `shelly-em-mcp`
+command name may not resolve even though it works in a shell. Use the absolute path instead:
+
+- macOS/Linux: `~/.dotnet/tools/shelly-em-mcp`
+- Windows: `%USERPROFILE%\.dotnet\tools\shelly-em-mcp.exe`
+
+### Claude Code
+
+```bash
+claude mcp add shelly-em-mcp -- ~/.dotnet/tools/shelly-em-mcp
+```
+
+Restart or reconnect your Claude Code session - new MCP registrations aren't picked up
+mid-session.
+
+### Claude Desktop
+
+Edit `claude_desktop_config.json` (macOS:
+`~/Library/Application Support/Claude/claude_desktop_config.json`; Windows:
+`%APPDATA%\Claude\claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "shelly-em-mcp": {
+      "command": "/Users/you/.dotnet/tools/shelly-em-mcp",
+      "args": [],
+      "env": {
+        "Shelly__Devices__0__Name": "Hausanschluss",
+        "Shelly__Devices__0__Host": "192.168.1.100"
+      }
+    }
+  }
+}
+```
+
+Restart Claude Desktop to pick it up.
+
+### LM Studio
+
+LM Studio's MCP config (`mcp.json`) follows the same `command`/`args`/`env` shape as Claude
+Desktop above. Its documented path is `~/.lmstudio/mcp.json` (macOS/Linux) /
+`%USERPROFILE%\.lmstudio\mcp.json` (Windows), but there are user reports of the real path
+differing by version/OS - rather than guessing, use the in-app editor: **Program tab → Install
+→ Edit `mcp.json`**, which opens whichever file is actually authoritative for your install, and
+paste in the same JSON shown for Claude Desktop above (just the inner object works too, since
+LM Studio also uses an `mcpServers` map).
+
+## Building from source / contributing
+
+Not needed just to use the tool - see [`docs/DEVELOPER.md`](docs/DEVELOPER.md) in the repo for
+running from a clone, architecture notes, and how NuGet publishing works.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
