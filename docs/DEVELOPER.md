@@ -13,7 +13,8 @@ that.
 - Target: multi-targets `net8.0;net10.0` (net8.0 is the still-widely-installed LTS through ~Nov 2026; net10.0 is the current LTS through ~Nov 2028) - single project for now, no RID-specific builds.
 
 Deliberately not built yet (see the README's Status table for the reasoning behind each):
-switch/relay control, Gen1 device support, energy history/rollups, Shelly Cloud API support.
+switch/relay control, Gen1 device support, the `monophase` device profile (EM1/EM1Data instead
+of combined EM/EMData), Shelly Cloud API support.
 
 ## Running from source
 
