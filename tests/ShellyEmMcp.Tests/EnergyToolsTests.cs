@@ -110,25 +110,29 @@ public class EnergyToolsTests
     }
 
     [Test]
-    public void ParseEnergyHistory_SumsPerIntervalEnergyAcrossRecords()
+    public void ParseEnergyHistory_SumsNetEnergyAcrossBuckets()
     {
         const string rawJson = """
         {
-          "keys": ["a_total_act_energy", "a_total_act_ret_energy", "b_total_act_energy", "b_total_act_ret_energy", "c_total_act_energy", "c_total_act_ret_energy"],
+          "keys": ["a_net_act_energy", "b_net_act_energy", "c_net_act_energy"],
           "data": [
-            { "ts": 1000, "period": 60, "values": [[10.0, 0, 8.0, 0, 5.0, 0], [12.0, 1.5, 9.0, 0, 5.5, 0]] }
+            { "ts": 1000, "period": 3600, "values": [[10.0, 8.0, 5.0], [-2.0, 9.0, 5.5]] }
           ]
         }
         """;
 
-        var summary = EnergyTools.ParseEnergyHistory(rawJson, requestedHours: 24);
+        var summary = EnergyTools.ParseEnergyHistory(rawJson, requestedHours: 24, bucketSeconds: 3600);
 
-        Assert.That(summary.RecordCount, Is.EqualTo(2));
+        Assert.That(summary.BucketCount, Is.EqualTo(2));
         Assert.That(summary.Truncated, Is.False);
-        Assert.That(summary.PhaseAEnergyWh, Is.EqualTo(22.0));
-        Assert.That(summary.PhaseAReturnedEnergyWh, Is.EqualTo(1.5));
-        Assert.That(summary.TotalEnergyWh, Is.EqualTo(22.0 + 17.0 + 10.5));
-        Assert.That(summary.TotalReturnedEnergyWh, Is.EqualTo(1.5));
+        Assert.That(summary.PhaseANetEnergyWh, Is.EqualTo(8.0));
+        Assert.That(summary.PhaseBNetEnergyWh, Is.EqualTo(17.0));
+        Assert.That(summary.PhaseCNetEnergyWh, Is.EqualTo(10.5));
+        Assert.That(summary.TotalNetEnergyWh, Is.EqualTo(8.0 + 17.0 + 10.5));
+
+        Assert.That(summary.Buckets, Has.Count.EqualTo(2));
+        Assert.That(summary.Buckets[0], Is.EqualTo(new EnergyHistoryBucket(1000, 10.0, 8.0, 5.0)));
+        Assert.That(summary.Buckets[1], Is.EqualTo(new EnergyHistoryBucket(1000 + 3600, -2.0, 9.0, 5.5)));
     }
 
     [Test]
@@ -136,13 +140,13 @@ public class EnergyToolsTests
     {
         const string rawJson = """
         {
-          "keys": ["a_total_act_energy"],
-          "data": [{ "ts": 1000, "period": 60, "values": [[1.0]] }],
-          "next_record_ts": 1060
+          "keys": ["a_net_act_energy"],
+          "data": [{ "ts": 1000, "period": 3600, "values": [[1.0]] }],
+          "next_record_ts": 4600
         }
         """;
 
-        var summary = EnergyTools.ParseEnergyHistory(rawJson, requestedHours: 24);
+        var summary = EnergyTools.ParseEnergyHistory(rawJson, requestedHours: 24, bucketSeconds: 3600);
 
         Assert.That(summary.Truncated, Is.True);
     }
@@ -150,10 +154,11 @@ public class EnergyToolsTests
     [Test]
     public void ParseEnergyHistory_NoData_ReturnsZeroesNotTruncated()
     {
-        var summary = EnergyTools.ParseEnergyHistory("""{ "keys": [], "data": [] }""", requestedHours: 1);
+        var summary = EnergyTools.ParseEnergyHistory("""{ "keys": [], "data": [] }""", requestedHours: 1, bucketSeconds: 300);
 
-        Assert.That(summary.RecordCount, Is.EqualTo(0));
+        Assert.That(summary.BucketCount, Is.EqualTo(0));
         Assert.That(summary.Truncated, Is.False);
-        Assert.That(summary.TotalEnergyWh, Is.EqualTo(0));
+        Assert.That(summary.TotalNetEnergyWh, Is.EqualTo(0));
+        Assert.That(summary.Buckets, Is.Empty);
     }
 }

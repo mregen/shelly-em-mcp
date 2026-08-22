@@ -17,6 +17,27 @@ An example of what that looks like once the tools are connected (illustrative - 
 >
 > **Claude:** Your Hausanschluss meter is currently drawing 1.4 kW total - 620 W on phase A, 480 W on phase B, and 310 W on phase C.
 
+`get_energy_history`'s bucketed output is enough for an LLM client to reason about patterns
+over time, not just single readings - a real example from this project's own development:
+
+> **You:** This household has a PV which can feed up to 5kW into the house system. However,
+> it's an East/West config (6kW divided to a 3/3 east/west), so the max full power that can be
+> achieved is roughly 4.5kW. Please analyze the 24 hours of power usage and feedback, so I can
+> determine an imbalance in how the electric consumption is divided.
+>
+> **Claude:** In 18 of the last 96 fifteen-minute buckets, Phase A was exporting to the grid
+> while Phase B and/or C were simultaneously importing - about 0.62 kWh/day of self-consumption
+> that a 3-phase-balanced PV inverter couldn't reach because the load wasn't on that phase.
+> Phase B runs consistently heaviest, with a sharp spike around 21:00-22:00 suggesting a
+> scheduled appliance. Whether this is worth fixing depends on whether your grid operator meters
+> phases separately or nets their sum before billing.
+
+![Per-phase net energy chart, generated from get_energy_history's output, showing three colored lines (Phase A, B, C) over 24 hours with shaded bands marking periods where phases oppose each other](docs/images/phase-balance-example.png)
+
+The chart itself isn't something this MCP server renders - it's what the LLM client built from
+`get_energy_history`'s per-bucket JSON. Shown here as an example of what's possible with the raw
+data this tool returns, not a claim that charting is a built-in feature.
+
 ## Requirements
 
 - **.NET 8 or .NET 10 runtime** - to install and run the tool (see [Install](#install) below)
@@ -25,17 +46,16 @@ An example of what that looks like once the tools are connected (illustrative - 
 
 ## Status
 
-Initial build, implemented against the documented Shelly Gen2 RPC API and covered by unit tests,
-but **not yet exercised against a real device** - see [`CLAUDE.md`](CLAUDE.md) for what's still
-pending before that status can be upgraded.
+Working, verified against a real Shelly Pro 3EM (`SPEM-003CEBEU`, firmware 2.0.0, `triphase`
+profile) on the local network.
 
 | Feature | Status |
 |---|---|
-| Local device status (uptime, cloud connectivity) | 🟡 Implemented, not yet verified live |
-| Live per-phase power/voltage/current/power-factor/frequency/error flags | 🟡 Implemented, not yet verified live |
-| Cumulative energy totals (consumed/returned, per phase) | 🟡 Implemented, not yet verified live |
-| Alarm/CT-type configuration | 🟡 Implemented, not yet verified live |
-| Local energy history (on-device, no Cloud) | 🟡 Implemented, not yet verified live - see the interval-semantics caveat in `CLAUDE.md` |
+| Local device status (uptime, cloud connectivity) | ✅ Working, verified live |
+| Live per-phase power/voltage/current/power-factor/frequency/error flags | ✅ Working, verified live |
+| Cumulative energy totals (consumed/returned, per phase) | ✅ Working, verified live |
+| Alarm/CT-type configuration | ✅ Working, verified live |
+| Local energy history (on-device, no Cloud), net Wh per phase bucketed by time | ✅ Working, verified live - see `CLAUDE.md` for why it reports *net* energy rather than separate consumed/returned |
 | Switch/relay control | ⏳ Not built - none of the devices tested against have a relay |
 | Gen1 device support (older 3EM/EM REST API) | ⏳ Not built - not needed for a Gen2/Gen3 device |
 | `monophase` profile (per-channel EM1/EM1Data instead of combined EM) | ⏳ Not built - assumes the default `triphase` profile |
@@ -64,7 +84,7 @@ network isn't trusted.
 | `get_energy_live` | Full per-phase breakdown (voltage, current, active/apparent power, power factor, frequency, error/alarm flags for A/B/C, plus neutral current and totals) for one device |
 | `get_energy_totals` | Cumulative energy counters (Wh consumed/returned, per phase and total) for one device |
 | `get_energy_config` | CT type, phase-reversal settings, and alarm thresholds (under/over voltage, current, power per phase) for one device |
-| `get_energy_history` | Total energy consumed/returned per phase over a recent time window, summed from the device's own on-device history (Pro 3EM stores ~60 days of 1-minute data locally - no Shelly Cloud needed) |
+| `get_energy_history` | Net energy per phase (consumed minus returned) over a recent time window, bucketed from the device's own on-device history (no Shelly Cloud needed); max window 7 days |
 
 ## Install
 

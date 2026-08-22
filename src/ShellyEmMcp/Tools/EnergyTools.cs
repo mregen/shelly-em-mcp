@@ -94,14 +94,13 @@ public class EnergyTools(IReadOnlyList<ShellyDeviceOptions> devices, ShellyRpcCl
     }
 
     [McpServerTool(Name = "get_energy_history")]
-    [Description("Get total energy consumed and returned per phase over a recent time window, from the device's " +
-        "own on-device history - Shelly Pro 3EM stores about 60 days of 1-minute-interval data locally, so this " +
-        "needs no Shelly Cloud account. Sums each interval's energy delta over the window; if more data exists " +
-        "than fit in one response the result is marked truncated and only covers the earliest part of the " +
-        "window - call again with a shorter window if that happens.")]
+    [Description("Get net energy per phase over a recent time window, broken into buckets, from the device's own " +
+        "on-device history - Shelly Pro 3EM stores about 60 days locally, so this needs no Shelly Cloud account. " +
+        "A negative bucket value means that phase exported more than it consumed during that bucket (e.g. solar " +
+        "feed-in exceeding load); for a plain load-only meter, net energy equals energy consumed.")]
     public async Task<string> GetEnergyHistory(
         [Description("Configured device name")] string device,
-        [Description("How many hours back from now to sum energy over (default 24, max 1440 = 60 days)")] int hours = 24,
+        [Description("How many hours back from now to cover (default 24, max 168 = 7 days)")] int hours = 24,
         CancellationToken cancellationToken = default)
     {
         var target = ShellyDeviceLookup.Find(devices, device);
@@ -110,22 +109,34 @@ public class EnergyTools(IReadOnlyList<ShellyDeviceOptions> devices, ShellyRpcCl
             return $"No configured Shelly device named '{device}'.";
         }
 
-        hours = Math.Clamp(hours, 1, 1440);
+        hours = Math.Clamp(hours, 1, 168);
+
+        // Bucket width chosen so a single EMData.GetNetEnergies call comfortably covers the requested window
+        // without the device needing to chunk the response (empirically, raw per-minute EMData.GetData chunks
+        // after only ~6 records even for a 1-hour window - see EnergyTools' class-level notes - so this tool
+        // uses the device's own period-aggregation instead of summing raw per-minute records).
+        var periodSeconds = hours switch
+        {
+            <= 6 => 300,
+            <= 24 => 900,
+            _ => 3600,
+        };
+
         var endTs = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-        var startTs = endTs - (hours * 3600L);
+        var startTs = ((endTs - (hours * 3600L)) / periodSeconds) * periodSeconds;
 
         var rawJson = await rpc.CallAsync(
             target.Host,
-            "EMData.GetData",
+            "EMData.GetNetEnergies",
             new Dictionary<string, string>
             {
                 ["id"] = "0",
                 ["ts"] = startTs.ToString(CultureInfo.InvariantCulture),
-                ["end_ts"] = endTs.ToString(CultureInfo.InvariantCulture),
+                ["period"] = periodSeconds.ToString(CultureInfo.InvariantCulture),
             },
             cancellationToken);
 
-        return JsonSerializer.Serialize(ParseEnergyHistory(rawJson, hours));
+        return JsonSerializer.Serialize(ParseEnergyHistory(rawJson, hours, periodSeconds));
     }
 
     private async Task<PowerReading> GetPowerAsync(ShellyDeviceOptions device, CancellationToken cancellationToken)
@@ -251,15 +262,19 @@ public class EnergyTools(IReadOnlyList<ShellyDeviceOptions> devices, ShellyRpcCl
     }
 
     /// <summary>
-    /// Parses an EMData.GetData response (https://shelly-api-docs.shelly.cloud/gen2/ComponentsAndServices/EMData)
-    /// and sums the `{a,b,c}_total_act_energy`/`{a,b,c}_total_act_ret_energy` values across every returned
-    /// 1-minute interval record. The docs' example shows these fields alongside min/max/avg power and voltage
-    /// stats for the same 60-second interval, which is why each record's value is treated as that interval's
-    /// energy delta (summed to get window total) rather than a running total - inferred from the docs, not yet
-    /// confirmed against a live response. `next_record_ts` being present means the response was chunked and
-    /// doesn't cover the full requested window.
+    /// Parses an EMData.GetNetEnergies response
+    /// (https://shelly-api-docs.shelly.cloud/gen2/ComponentsAndServices/EMData) into one
+    /// <see cref="EnergyHistoryBucket"/> per returned interval plus the summed totals across all of them.
+    /// `{a,b,c}_net_act_energy` is each bucket's net Wh (consumed minus returned) for that period; a bucket's
+    /// timestamp is `block.ts + index * block.period` (confirmed against the docs' `data[].ts`/`period` shape -
+    /// `ts` is the first interval's start, not each record's). Confirmed live against a Shelly Pro 3EM: a
+    /// `period=3600` (hourly) request for the last 24 hours returned all 24 buckets in a single response with no
+    /// `next_record_ts`, unlike the raw per-minute `EMData.GetData` endpoint, which chunked after only ~6 records
+    /// even for a 1-hour window on the same device - this is why history uses net-energy buckets instead of
+    /// summing raw per-minute records. `next_record_ts` being present means the response was still chunked and
+    /// doesn't cover the full window.
     /// </summary>
-    internal static EnergyHistorySummary ParseEnergyHistory(string rawJson, int requestedHours)
+    internal static EnergyHistorySummary ParseEnergyHistory(string rawJson, int requestedHours, int bucketSeconds)
     {
         using var doc = JsonDocument.Parse(rawJson);
         var root = doc.RootElement;
@@ -268,51 +283,58 @@ public class EnergyTools(IReadOnlyList<ShellyDeviceOptions> devices, ShellyRpcCl
             ? keysEl.EnumerateArray().Select(k => k.GetString() ?? string.Empty).ToList()
             : [];
 
-        double SumKey(string keyName)
-        {
-            var index = keys.IndexOf(keyName);
-            if (index < 0 || !root.TryGetProperty("data", out var dataEl) || dataEl.ValueKind != JsonValueKind.Array)
-            {
-                return 0;
-            }
+        var aIndex = keys.IndexOf("a_net_act_energy");
+        var bIndex = keys.IndexOf("b_net_act_energy");
+        var cIndex = keys.IndexOf("c_net_act_energy");
 
-            double total = 0;
+        var buckets = new List<EnergyHistoryBucket>();
+        if (root.TryGetProperty("data", out var dataEl) && dataEl.ValueKind == JsonValueKind.Array)
+        {
             foreach (var block in dataEl.EnumerateArray())
             {
-                if (!block.TryGetProperty("values", out var valuesEl) || valuesEl.ValueKind != JsonValueKind.Array)
+                if (!block.TryGetProperty("ts", out var blockTsEl) || blockTsEl.ValueKind != JsonValueKind.Number
+                    || !block.TryGetProperty("period", out var periodEl) || periodEl.ValueKind != JsonValueKind.Number
+                    || !block.TryGetProperty("values", out var valuesEl) || valuesEl.ValueKind != JsonValueKind.Array)
                 {
                     continue;
                 }
 
+                var blockTs = blockTsEl.GetInt64();
+                var period = periodEl.GetInt64();
+                var recordIndex = 0;
+
                 foreach (var record in valuesEl.EnumerateArray())
                 {
-                    if (record.ValueKind == JsonValueKind.Array && record.GetArrayLength() > index
-                        && record[index].ValueKind == JsonValueKind.Number)
+                    if (record.ValueKind == JsonValueKind.Array)
                     {
-                        total += record[index].GetDouble();
+                        buckets.Add(new EnergyHistoryBucket(
+                            blockTs + (recordIndex * period),
+                            ReadIndexed(record, aIndex),
+                            ReadIndexed(record, bIndex),
+                            ReadIndexed(record, cIndex)));
                     }
+
+                    recordIndex++;
                 }
             }
-
-            return total;
         }
-
-        var recordCount = root.TryGetProperty("data", out var data) && data.ValueKind == JsonValueKind.Array
-            ? data.EnumerateArray().Sum(block => block.TryGetProperty("values", out var v) && v.ValueKind == JsonValueKind.Array ? v.GetArrayLength() : 0)
-            : 0;
 
         var truncated = root.TryGetProperty("next_record_ts", out var nextTs) && nextTs.ValueKind == JsonValueKind.Number;
 
         return new EnergyHistorySummary(
             requestedHours,
-            recordCount,
+            bucketSeconds,
+            buckets.Count,
             truncated,
-            SumKey("a_total_act_energy"),
-            SumKey("b_total_act_energy"),
-            SumKey("c_total_act_energy"),
-            SumKey("a_total_act_ret_energy"),
-            SumKey("b_total_act_ret_energy"),
-            SumKey("c_total_act_ret_energy"));
+            buckets.Sum(b => b.PhaseANetEnergyWh),
+            buckets.Sum(b => b.PhaseBNetEnergyWh),
+            buckets.Sum(b => b.PhaseCNetEnergyWh),
+            buckets);
+
+        static double ReadIndexed(JsonElement record, int index) =>
+            index >= 0 && record.GetArrayLength() > index && record[index].ValueKind == JsonValueKind.Number
+                ? record[index].GetDouble()
+                : 0;
     }
 
     private static List<string> ReadStringArray(JsonElement element, string propertyName) =>
@@ -361,18 +383,17 @@ public sealed record EnergyConfig(
     EnergyPhaseAlarms? AlarmsB,
     EnergyPhaseAlarms? AlarmsC);
 
+public sealed record EnergyHistoryBucket(long UnixTimestamp, double PhaseANetEnergyWh, double PhaseBNetEnergyWh, double PhaseCNetEnergyWh);
+
 public sealed record EnergyHistorySummary(
     int RequestedHours,
-    int RecordCount,
+    int BucketSeconds,
+    int BucketCount,
     bool Truncated,
-    double PhaseAEnergyWh,
-    double PhaseBEnergyWh,
-    double PhaseCEnergyWh,
-    double PhaseAReturnedEnergyWh,
-    double PhaseBReturnedEnergyWh,
-    double PhaseCReturnedEnergyWh)
+    double PhaseANetEnergyWh,
+    double PhaseBNetEnergyWh,
+    double PhaseCNetEnergyWh,
+    IReadOnlyList<EnergyHistoryBucket> Buckets)
 {
-    public double TotalEnergyWh => PhaseAEnergyWh + PhaseBEnergyWh + PhaseCEnergyWh;
-
-    public double TotalReturnedEnergyWh => PhaseAReturnedEnergyWh + PhaseBReturnedEnergyWh + PhaseCReturnedEnergyWh;
+    public double TotalNetEnergyWh => PhaseANetEnergyWh + PhaseBNetEnergyWh + PhaseCNetEnergyWh;
 }

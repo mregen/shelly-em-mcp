@@ -103,6 +103,31 @@ dead functionality.
   wasn't used here for consistency with the RPC-only client). None of these seemed valuable
   enough to add speculatively; revisit if a real need comes up.
 
+## Status update, 2026-08-22 (continued - live verification against the real Pro 3EM)
+
+Registered as an MCP server (`claude mcp add shelly-em-mcp -s local -e Shelly__Devices__0__Name=Hausanschluss -e Shelly__Devices__0__Host=192.168.1.11 -- ~/.dotnet/tools/shelly-em-mcp.exe`) and exercised against the real device for the first time.
+
+**`get_energy_history` redesigned after live testing revealed a real problem**, not just a
+docs-inferred one: it originally summed raw per-minute records from `EMData.GetData`. Live on the
+Pro 3EM, that endpoint chunks *very* aggressively - a request for just the last 1 hour (60 records
+expected) returned only 6 records before `next_record_ts` appeared. A 24-hour request would have
+needed roughly 240 sequential RPC calls to fully page through, which the original implementation
+didn't even attempt (it took the first, heavily-truncated page and reported wrong totals silently
+correct-looking but covering only ~6 minutes instead of 24 hours).
+
+Fixed by switching to `EMData.GetNetEnergies` instead, which aggregates on the device side into
+period buckets (300/900/1800/3600s) rather than returning raw per-minute rows. Verified live: a
+`period=900` (15-minute) request for the last 24 hours returned all 96 buckets in a single
+response, `next_record_ts` absent. The tool now reports **net** energy per phase (consumed minus
+returned) rather than separate consumed/returned totals - a real trade-off, but the practical
+choice given the chunking behavior, and for a load-only meter (no solar) net equals consumption
+anyway. Bucket width scales with the requested window (5 min for ≤6h, 15 min for ≤24h, 1h beyond
+that) and `hours` is capped at 168 (7 days) rather than the original 1440 (60 days), since even
+bucketed requests could still chunk for very wide windows and nothing this large has been tested.
+
+Also confirmed live: `list_devices`/`Shelly.GetDeviceInfo` fields (model `SPEM-003CEBEU`, gen 2,
+app `Pro3EM`, `auth_en: false`, `profile: "triphase"` - matches the assumed default profile).
+
 ## Next steps
 
 - **Verify against the real Pro 3EM.** Nothing in this session touched the actual device (no
