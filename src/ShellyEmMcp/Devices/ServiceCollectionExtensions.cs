@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 
+using ShellyEmMcp.Tools;
+
 namespace ShellyEmMcp.Devices;
 
 public static class ServiceCollectionExtensions
@@ -25,6 +27,12 @@ public static class ServiceCollectionExtensions
             httpClient.Timeout = TimeSpan.FromSeconds(5);
             return new ShellyRpcClient(httpClient);
         });
+
+        // Also directly resolvable, not just discoverable via MCP's WithToolsFromAssembly() -
+        // the --dashboard mode's minimal API endpoints call these same tool methods rather than
+        // duplicating the RPC/parsing logic behind a second code path.
+        services.AddSingleton<DeviceTools>();
+        services.AddSingleton<EnergyTools>();
 
         return services;
     }

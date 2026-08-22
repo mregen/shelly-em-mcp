@@ -141,3 +141,51 @@ app `Pro3EM`, `auth_en: false`, `profile: "triphase"` - matches the assumed defa
 - Once verified live, revisit the Status table in `README.md` (currently marks live features
   "verified" preemptively based on doc-confirmed field names + passing unit tests, not an actual
   device call - should be corrected either way once tested).
+
+## Status update, 2026-08-22 (continued - standalone `--dashboard` mode)
+
+Added a third `Program.cs` mode, `--dashboard`, alongside stdio and `--http` - a plain browser
+dashboard (live power widget + today's history chart), not an MCP server. Your idea: leave a
+browser tab open to see at a glance whether there's PV surplus before starting something like the
+dishwasher.
+
+**Key design point, and why it stayed simple:** the dashboard's `/api/power` and
+`/api/history/today` minimal-API endpoints don't reimplement any RPC or parsing logic - they
+inject and call `EnergyTools.GetPower()`/`GetEnergyHistory()` directly (the same classes MCP's
+`WithToolsFromAssembly()` exposes as tools), now also registered directly in DI via
+`AddShellyClients()`. Two lines of new registration bought reuse of everything already built and
+verified this session.
+
+**Per your answers:** the live widget shows only the current net-power number (green/red by
+sign), no per-appliance wattage threshold - and updates are plain browser polling (`fetch` every
+~4s for power, ~60s for the chart), no SSE/WebSocket. Both were explicit simplicity choices, not
+oversights - see the plan file's "What's explicitly out of scope for v1" if this needs revisiting.
+
+**One real unknown resolved during verification:** `Microsoft.NET.Sdk.Web`'s `wwwroot` folder does
+**not** get copied to `bin/{Debug,Release}/net10.0/` by a plain `dotnet build` - only by
+`dotnet publish` (confirmed by running `dotnet publish` directly and inspecting the output; a
+`dotnet run` from source still serves it correctly via ASP.NET Core's dev-time static web assets
+pipeline, so local testing wasn't affected). Since `dotnet pack` for a `PackAsTool` project packs
+the *publish* output, this confirms `wwwroot/index.html` reaches the installed global tool
+correctly without any extra `.csproj` changes.
+
+**A real bug caught by testing the installed tool, not just `dotnet run`:** the first version
+returned `GET /` as a 404 when launched as the actual installed global tool (`shelly-em-mcp
+--dashboard`) from an unrelated working directory, despite working fine via `dotnet run` from the
+project folder and despite `wwwroot` being correctly present next to the installed exe.
+Root cause: `WebApplication.CreateBuilder(args)` defaults `ContentRootPath` to
+`Directory.GetCurrentDirectory()`, not the assembly's own directory - fine when the CWD happens to
+be the project folder (`dotnet run`), wrong for a global tool invoked from wherever the user
+happens to be. Fixed by passing `ContentRootPath = AppContext.BaseDirectory` explicitly via
+`WebApplicationOptions`. Verified live end to end *as the installed tool*, launched from an
+unrelated directory (`~`, not the repo): `GET /` returns the page (200, correct byte count),
+`GET /api/power` returns live wattage matching a manual `EM.GetStatus` call, `GET
+/api/history/today` returns 200 with today's bucketed history so far.
+
+Could not get a browser screenshot of the rendered page in this session (the browser automation
+tool couldn't reach this machine's `localhost`/`127.0.0.1` - a sandboxing limitation of that tool,
+not the dashboard) - the JS was still double-checked carefully against the actual JSON field
+casing the endpoints return (mixed: the literal-cased anonymous object in `GetPower()`'s
+all-devices branch vs. PascalCase on the `PowerReading`/`EnergyHistorySummary` records nested
+inside it - easy to get wrong by assuming one casing convention throughout). Worth an actual
+visual check next time a session has real browser access to this machine.

@@ -1,0 +1,228 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>shelly-em-mcp dashboard</title>
+<style>
+  :root {
+    color-scheme: light;
+    --page: #f9f9f7;
+    --surface-1: #fcfcfb;
+    --text-primary: #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted: #898781;
+    --grid: #e1e0d9;
+    --baseline: #c3c2b7;
+    --border: rgba(11,11,11,0.10);
+    --series-a: #2a78d6;
+    --series-b: #eb6834;
+    --series-c: #1baf7a;
+    --good: #0ca30c;
+    --critical: #d03b3b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --page: #0d0d0d;
+      --surface-1: #1a1a19;
+      --text-primary: #ffffff;
+      --text-secondary: #c3c2b7;
+      --text-muted: #898781;
+      --grid: #2c2c2a;
+      --baseline: #383835;
+      --border: rgba(255,255,255,0.10);
+      --series-a: #3987e5;
+      --series-b: #d95926;
+      --series-c: #199e70;
+      --good: #0ca30c;
+      --critical: #e66767;
+    }
+  }
+  [data-theme="dark"] {
+    color-scheme: dark;
+    --page: #0d0d0d;
+    --surface-1: #1a1a19;
+    --text-primary: #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted: #898781;
+    --grid: #2c2c2a;
+    --baseline: #383835;
+    --border: rgba(255,255,255,0.10);
+    --series-a: #3987e5;
+    --series-b: #d95926;
+    --series-c: #199e70;
+    --good: #0ca30c;
+    --critical: #e66767;
+  }
+
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--page); color: var(--text-primary); font-family: system-ui, -apple-system, "Segoe UI", sans-serif; }
+  .root { max-width: 720px; margin: 0 auto; padding: 28px 20px 40px; }
+  h1 { font-size: 16px; font-weight: 600; margin: 0 0 4px; }
+  .subtitle { font-size: 12.5px; color: var(--text-muted); margin: 0 0 20px; }
+
+  .power-card {
+    background: var(--surface-1); border: 1px solid var(--border); border-radius: 14px;
+    padding: 22px 24px; margin-bottom: 16px; text-align: center;
+  }
+  .power-value { font-size: 40px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.1; }
+  .power-value.exporting { color: var(--good); }
+  .power-value.importing { color: var(--critical); }
+  .power-status { font-size: 13px; color: var(--text-secondary); margin-top: 4px; }
+  .power-devices { font-size: 11.5px; color: var(--text-muted); margin-top: 10px; }
+  .stale { opacity: 0.5; }
+
+  .card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 14px; padding: 18px 18px 8px; }
+  .card h2 { font-size: 13px; font-weight: 600; margin: 0 0 12px; color: var(--text-secondary); }
+  .legend { display: flex; gap: 16px; margin-bottom: 8px; font-size: 11.5px; color: var(--text-secondary); }
+  .legend .item { display: flex; align-items: center; gap: 5px; }
+  .legend .swatch { width: 9px; height: 9px; border-radius: 2px; }
+
+  svg { display: block; width: 100%; height: auto; }
+  .gridline { stroke: var(--grid); stroke-width: 1; }
+  .baseline { stroke: var(--baseline); stroke-width: 1.5; }
+  .axis-label { fill: var(--text-muted); font-size: 10px; }
+  .line { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+  .line-a { stroke: var(--series-a); }
+  .line-b { stroke: var(--series-b); }
+  .line-c { stroke: var(--series-c); }
+
+  .footer-note { font-size: 11px; color: var(--text-muted); text-align: center; margin-top: 18px; }
+</style>
+</head>
+<body>
+<div class="root">
+  <h1>shelly-em-mcp</h1>
+  <p class="subtitle">Live dashboard - refreshes automatically, no need to reload</p>
+
+  <div class="power-card" id="power-card">
+    <div class="power-value" id="power-value">–</div>
+    <div class="power-status" id="power-status">Loading…</div>
+    <div class="power-devices" id="power-devices"></div>
+  </div>
+
+  <div class="card">
+    <h2>Today so far</h2>
+    <div class="legend">
+      <span class="item"><span class="swatch" style="background:var(--series-a)"></span>Phase A</span>
+      <span class="item"><span class="swatch" style="background:var(--series-b)"></span>Phase B</span>
+      <span class="item"><span class="swatch" style="background:var(--series-c)"></span>Phase C</span>
+    </div>
+    <svg id="chart" viewBox="0 0 660 260" preserveAspectRatio="xMidYMid meet"></svg>
+  </div>
+
+  <p class="footer-note">Positive = importing from the grid · Negative = exporting (PV surplus)</p>
+</div>
+
+<script>
+(function () {
+  const POWER_POLL_MS = 4000;
+  const HISTORY_POLL_MS = 60000;
+
+  function fmtKw(watts) {
+    return (Math.abs(watts) / 1000).toFixed(2) + ' kW';
+  }
+
+  async function refreshPower() {
+    const valueEl = document.getElementById('power-value');
+    const statusEl = document.getElementById('power-status');
+    const devicesEl = document.getElementById('power-devices');
+    try {
+      const res = await fetch('/api/power', { cache: 'no-store' });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      const total = data.totalActivePowerWatts ?? 0;
+      const exporting = total < 0;
+      valueEl.textContent = (exporting ? '−' : '+') + fmtKw(total);
+      valueEl.className = 'power-value ' + (exporting ? 'exporting' : 'importing');
+      statusEl.textContent = exporting
+        ? 'Exporting to grid - PV surplus available'
+        : 'Importing from grid - no PV surplus right now';
+
+      const devices = Array.isArray(data.devices) ? data.devices : [];
+      devicesEl.textContent = devices
+        .map(d => d.Name + ': ' + (d.Online === false ? 'offline' : fmtKw(d.ActivePowerWatts ?? 0) + (d.ActivePowerWatts < 0 ? ' export' : ' import')))
+        .join(' · ');
+    } catch (err) {
+      statusEl.textContent = 'Unable to reach device (' + err.message + ') - retrying…';
+      valueEl.classList.add('stale');
+    }
+  }
+
+  function renderChart(buckets) {
+    const svg = document.getElementById('chart');
+    svg.innerHTML = '';
+    if (!buckets || buckets.length === 0) return;
+
+    const W = 660, H = 260;
+    const padL = 44, padR = 10, padT = 8, padB = 24;
+    const plotW = W - padL - padR, plotH = H - padT - padB;
+
+    const values = buckets.flatMap(b => [b.PhaseANetEnergyWh, b.PhaseBNetEnergyWh, b.PhaseCNetEnergyWh]);
+    const yMax = Math.max(0, ...values);
+    const yMin = Math.min(0, ...values);
+    const pad = Math.max(1, (yMax - yMin) * 0.08);
+    const yTop = yMax + pad, yBot = yMin - pad;
+
+    const n = buckets.length;
+    const x = i => padL + (n === 1 ? 0 : (i / (n - 1)) * plotW);
+    const y = v => padT + (1 - (v - yBot) / (yTop - yBot)) * plotH;
+
+    const ns = 'http://www.w3.org/2000/svg';
+    const el = (tag, attrs) => {
+      const e = document.createElementNS(ns, tag);
+      for (const k in attrs) e.setAttribute(k, attrs[k]);
+      return e;
+    };
+
+    for (let i = 0; i <= 4; i++) {
+      const v = yBot + (i / 4) * (yTop - yBot);
+      const gy = y(v);
+      svg.appendChild(el('line', { x1: padL, x2: W - padR, y1: gy, y2: gy, class: 'gridline' }));
+      const label = el('text', { x: padL - 6, y: gy + 3, class: 'axis-label', 'text-anchor': 'end' });
+      label.textContent = Math.round(v);
+      svg.appendChild(label);
+    }
+    const zeroY = y(0);
+    svg.appendChild(el('line', { x1: padL, x2: W - padR, y1: zeroY, y2: zeroY, class: 'baseline' }));
+
+    const step = Math.max(1, Math.round(n / 6));
+    for (let i = 0; i < n; i += step) {
+      const d = new Date(buckets[i].UnixTimestamp * 1000);
+      const label = el('text', { x: x(i), y: H - padB + 15, class: 'axis-label', 'text-anchor': 'middle' });
+      label.textContent = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      svg.appendChild(label);
+    }
+
+    const seriesDefs = [
+      { key: 'PhaseANetEnergyWh', cls: 'line-a' },
+      { key: 'PhaseBNetEnergyWh', cls: 'line-b' },
+      { key: 'PhaseCNetEnergyWh', cls: 'line-c' },
+    ];
+    for (const s of seriesDefs) {
+      const d = buckets.map((b, i) => `${i === 0 ? 'M' : 'L'}${x(i).toFixed(2)},${y(b[s.key]).toFixed(2)}`).join(' ');
+      svg.appendChild(el('path', { d, class: `line ${s.cls}` }));
+    }
+  }
+
+  async function refreshHistory() {
+    try {
+      const res = await fetch('/api/history/today', { cache: 'no-store' });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      renderChart(data.Buckets ?? []);
+    } catch (err) {
+      // Chart just stays as last-known-good on transient errors - the power widget already
+      // surfaces connectivity problems, no need to duplicate an error state here.
+    }
+  }
+
+  refreshPower();
+  refreshHistory();
+  setInterval(refreshPower, POWER_POLL_MS);
+  setInterval(refreshHistory, HISTORY_POLL_MS);
+})();
+</script>
+</body>
+</html>

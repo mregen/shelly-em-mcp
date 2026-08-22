@@ -56,6 +56,7 @@ profile) on the local network.
 | Cumulative energy totals (consumed/returned, per phase) | ✅ Working, verified live |
 | Alarm/CT-type configuration | ✅ Working, verified live |
 | Local energy history (on-device, no Cloud), net Wh per phase bucketed by time | ✅ Working, verified live - see `CLAUDE.md` for why it reports *net* energy rather than separate consumed/returned |
+| Live browser dashboard (`--dashboard`) | ✅ Working, verified live - see [Live dashboard](#live-dashboard) below |
 | Switch/relay control | ⏳ Not built - none of the devices tested against have a relay |
 | Gen1 device support (older 3EM/EM REST API) | ⏳ Not built - not needed for a Gen2/Gen3 device |
 | `monophase` profile (per-channel EM1/EM1Data instead of combined EM) | ⏳ Not built - assumes the default `triphase` profile |
@@ -122,6 +123,28 @@ shelly-em-mcp --http --urls http://localhost:5250    # HTTP - a long-running ser
 ```
 
 In HTTP mode the MCP endpoint is at `<url>/mcp` (Streamable HTTP), e.g. `http://localhost:5250/mcp`.
+
+## Live dashboard
+
+No LLM client needed for this one - `--dashboard` runs `shelly-em-mcp` as its own small web app
+instead of an MCP server, so you can leave a browser tab open and glance at your home's live power
+draw, assuming the Shelly EM IP address is 192.168.1.100:
+
+```bash
+shelly-em-mcp --dashboard --urls http://localhost:5260 --Shelly:Devices:0:Name=Hausanschluss  --Shelly:Devices:0:Host=192.168.1.100
+```
+
+Then open `http://localhost:5260` in a browser. It shows:
+
+- A live power widget - current net power in kW, green when you're exporting to the grid (PV
+  surplus available) and red when you're importing - refreshed every few seconds. This is the
+  "can I start the dishwasher right now" check: green means yes, there's spare PV to use.
+- A chart of today's per-phase net energy so far (the same bucketed data `get_energy_history`
+  returns), refreshed about once a minute.
+
+It's plain polling from the browser to two small JSON endpoints (`/api/power`,
+`/api/history/today`) - no build step, no WebSocket, nothing to install beyond the tool itself.
+The same [Security](#security) note applies: don't expose this beyond `localhost`/your own LAN.
 
 ## Configure Claude Code, Claude Desktop, or LM Studio
 
